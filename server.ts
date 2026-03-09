@@ -12,17 +12,26 @@ let supabaseClient: any = null;
 
 function getSupabase() {
   if (!supabaseClient) {
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_KEY;
+    const supabaseUrl = process.env.SUPABASE_URL?.trim();
+    const supabaseKey = process.env.SUPABASE_KEY?.trim();
 
-    if (!supabaseUrl || supabaseUrl === "your_supabase_url") {
-      throw new Error("SUPABASE_URL environment variable is missing or not configured.");
+    if (!supabaseUrl || supabaseUrl === "your_supabase_url" || supabaseUrl === "") {
+      throw new Error("SUPABASE_URL is missing. Please add it to your Secrets in AI Studio.");
     }
-    if (!supabaseKey || supabaseKey === "your_supabase_key") {
-      throw new Error("SUPABASE_KEY environment variable is missing or not configured.");
+    if (!supabaseKey || supabaseKey === "your_supabase_key" || supabaseKey === "") {
+      throw new Error("SUPABASE_KEY is missing. Please add it to your Secrets in AI Studio.");
     }
 
-    supabaseClient = createClient(supabaseUrl, supabaseKey);
+    // Basic URL validation
+    if (!supabaseUrl.startsWith("http://") && !supabaseUrl.startsWith("https://")) {
+      throw new Error("Invalid SUPABASE_URL. It must start with http:// or https://. Check your Secrets.");
+    }
+
+    try {
+      supabaseClient = createClient(supabaseUrl, supabaseKey);
+    } catch (err: any) {
+      throw new Error(`Failed to initialize Supabase: ${err.message}`);
+    }
   }
   return supabaseClient;
 }
@@ -130,20 +139,50 @@ async function startServer() {
     });
   }
 
-  // Proxy fetch for scraping
-  app.get("/api/proxy-fetch", async (req, res) => {
+  // Proxy fetch for scraping (Netlify compatibility)
+  app.get("/.netlify/functions/scrape", async (req, res) => {
     const { url } = req.query;
     if (!url || typeof url !== "string") {
       return res.status(400).json({ error: "URL is required" });
     }
 
     try {
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch: ${response.statusText}`);
+      const fetchRes = await fetch(url);
+      if (!fetchRes.ok) {
+        throw new Error(`Failed to fetch: ${fetchRes.statusText}`);
       }
-      const html = await response.text();
-      res.send(html);
+      const html = await fetchRes.text();
+
+      // Use Gemini to extract metadata (same as Netlify function)
+      const apiKey = process.env.GEMINI_API_KEY || "";
+      if (!apiKey) {
+        throw new Error("GEMINI_API_KEY is not configured.");
+      }
+
+      const { GoogleGenAI, Type } = await import("@google/genai");
+      const ai = new GoogleGenAI({ apiKey });
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Extract the game title, a short description, and a thumbnail image URL from this HTML content of a game page. Return only JSON.
+        
+        HTML Content (truncated):
+        ${html.substring(0, 15000)}`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              description: { type: Type.STRING },
+              thumbnail: { type: Type.STRING },
+            },
+            required: ["title", "description", "thumbnail"],
+          },
+        },
+      });
+
+      const result = JSON.parse(response.text || '{}');
+      res.json(result);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

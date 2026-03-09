@@ -2,6 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { Gamepad2, Plus, Trash2, Lock, LogOut, Play, X, Info, Wand2, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, Type } from "@google/genai";
+import { createClient } from "@supabase/supabase-js";
+
+// Initialize Supabase client
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || "";
+const supabaseKey = import.meta.env.VITE_SUPABASE_KEY || "";
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 interface Game {
   id: number;
@@ -33,38 +39,42 @@ export default function App() {
   useEffect(() => {
     fetchGames();
 
-    // WebSocket for real-time updates
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}`;
-    const ws = new WebSocket(wsUrl);
-
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'GAME_ADDED') {
+    // Subscribe to real-time changes using Supabase Realtime
+    const channel = supabase
+      .channel('public:games')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'games' }, (payload) => {
         setGames(prev => {
-          if (prev.some(g => g.id === data.game.id)) return prev;
-          return [data.game, ...prev];
+          if (prev.some(g => g.id === payload.new.id)) return prev;
+          return [payload.new as Game, ...prev];
         });
-      } else if (data.type === 'GAME_DELETED') {
-        setGames(prev => prev.filter(g => g.id !== data.id));
-      }
-    };
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'games' }, (payload) => {
+        setGames(prev => prev.filter(g => g.id !== payload.old.id));
+      })
+      .subscribe();
 
-    return () => ws.close();
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   const fetchGames = async () => {
     try {
-      const response = await fetch('/api/games');
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to fetch games');
+      if (!supabaseUrl || !supabaseKey) {
+        throw new Error('SUPABASE_URL or SUPABASE_KEY is missing. Please add them to your environment variables.');
       }
-      setGames(data);
+
+      const { data, error } = await supabase
+        .from('games')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setGames(data || []);
     } catch (error: any) {
       console.error('Error fetching games:', error);
-      if (error.message.includes('SUPABASE_URL')) {
-        alert('Supabase is not configured. Please add SUPABASE_URL and SUPABASE_KEY to your Secrets.');
+      if (error.message.includes('SUPABASE_URL') || error.message.includes('apiKey')) {
+        alert('Supabase is not configured. Please add VITE_SUPABASE_URL and VITE_SUPABASE_KEY to your environment variables.');
       }
     } finally {
       setLoading(false);
@@ -85,18 +95,27 @@ export default function App() {
   const handleAddGame = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const response = await fetch('/api/games', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...newGame, password: 'bkenn204' })
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to add game');
+      if (newGame.password !== 'bkenn204') {
+        throw new Error('Incorrect admin password');
       }
-      fetchGames();
+
+      const { data, error } = await supabase
+        .from('games')
+        .insert([{
+          title: newGame.title,
+          url: newGame.url,
+          thumbnail: newGame.thumbnail,
+          description: newGame.description
+        }])
+        .select()
+        .single();
+
+      if (error) throw error;
+
       setShowAddModal(false);
       setNewGame({ title: '', url: '', thumbnail: '', description: '' });
+      // fetchGames() is not strictly needed because of Realtime subscription, but good for safety
+      fetchGames();
     } catch (error: any) {
       console.error('Error adding game:', error);
       alert(error.message);
@@ -105,16 +124,19 @@ export default function App() {
 
   const handleDeleteGame = async (id: number) => {
     if (!confirm('Are you sure you want to delete this game?')) return;
+    const password = prompt('Enter admin password to delete:');
+    if (password !== 'bkenn204') {
+      alert('Unauthorized');
+      return;
+    }
+
     try {
-      const response = await fetch(`/api/games/${id}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: 'bkenn204' })
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to delete game');
-      }
+      const { error } = await supabase
+        .from('games')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
       fetchGames();
     } catch (error: any) {
       console.error('Error deleting game:', error);
@@ -126,34 +148,10 @@ export default function App() {
     if (!scrapeUrl) return;
     setIsScraping(true);
     try {
-      // 1. Fetch HTML via proxy
-      const proxyRes = await fetch(`/api/proxy-fetch?url=${encodeURIComponent(scrapeUrl)}`);
-      if (!proxyRes.ok) throw new Error('Failed to fetch page content');
-      const html = await proxyRes.text();
-
-      // 2. Use Gemini to extract metadata
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `Extract the game title, a short description, and a thumbnail image URL from this HTML content of a game page. Return only JSON.
-        
-        HTML Content (truncated):
-        ${html.substring(0, 15000)}`,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING },
-              description: { type: Type.STRING },
-              thumbnail: { type: Type.STRING },
-            },
-            required: ["title", "description", "thumbnail"],
-          },
-        },
-      });
-
-      const result = JSON.parse(response.text || '{}');
+      const proxyRes = await fetch(`/.netlify/functions/scrape?url=${encodeURIComponent(scrapeUrl)}`);
+      if (!proxyRes.ok) throw new Error('Failed to extract game info');
+      
+      const result = await proxyRes.json();
       
       setNewGame({
         title: result.title || '',
@@ -162,7 +160,7 @@ export default function App() {
         description: result.description || ''
       });
       setScrapeUrl('');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Scraping error:', error);
       alert('Failed to extract game info. Please fill it manually.');
     } finally {
