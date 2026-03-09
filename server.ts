@@ -1,23 +1,31 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
-import Database from "better-sqlite3";
 import path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
+import { createClient } from "@supabase/supabase-js";
+import dotenv from "dotenv";
 
-const db = new Database("games.db");
+dotenv.config();
 
-// Initialize database
-db.exec(`
-  CREATE TABLE IF NOT EXISTS games (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    url TEXT NOT NULL,
-    thumbnail TEXT,
-    description TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+let supabaseClient: any = null;
+
+function getSupabase() {
+  if (!supabaseClient) {
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_KEY;
+
+    if (!supabaseUrl || supabaseUrl === "your_supabase_url") {
+      throw new Error("SUPABASE_URL environment variable is missing or not configured.");
+    }
+    if (!supabaseKey || supabaseKey === "your_supabase_key") {
+      throw new Error("SUPABASE_KEY environment variable is missing or not configured.");
+    }
+
+    supabaseClient = createClient(supabaseUrl, supabaseKey);
+  }
+  return supabaseClient;
+}
 
 async function startServer() {
   const app = express();
@@ -37,12 +45,22 @@ async function startServer() {
   };
 
   // API Routes
-  app.get("/api/games", (req, res) => {
-    const games = db.prepare("SELECT * FROM games ORDER BY created_at DESC").all();
-    res.json(games);
+  app.get("/api/games", async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      const { data, error } = await supabase
+        .from("games")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+      res.json(data || []);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
-  app.post("/api/games", (req, res) => {
+  app.post("/api/games", async (req, res) => {
     const { title, url, thumbnail, description, password } = req.body;
 
     if (password !== "bkenn204") {
@@ -54,22 +72,25 @@ async function startServer() {
     }
 
     try {
-      const info = db.prepare(
-        "INSERT INTO games (title, url, thumbnail, description) VALUES (?, ?, ?, ?)"
-      ).run(title, url, thumbnail, description);
-      
-      const newGame = db.prepare("SELECT * FROM games WHERE id = ?").get(info.lastInsertRowid);
-      
+      const supabase = getSupabase();
+      const { data, error } = await supabase
+        .from("games")
+        .insert([{ title, url, thumbnail, description }])
+        .select()
+        .single();
+
+      if (error) throw error;
+
       // Broadcast update
-      broadcast({ type: "GAME_ADDED", game: newGame });
+      broadcast({ type: "GAME_ADDED", game: data });
       
-      res.status(201).json(newGame);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to add game" });
+      res.status(201).json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
     }
   });
 
-  app.delete("/api/games/:id", (req, res) => {
+  app.delete("/api/games/:id", async (req, res) => {
     const { password } = req.body;
     const { id } = req.params;
 
@@ -78,14 +99,20 @@ async function startServer() {
     }
 
     try {
-      db.prepare("DELETE FROM games WHERE id = ?").run(id);
+      const supabase = getSupabase();
+      const { error } = await supabase
+        .from("games")
+        .delete()
+        .eq("id", id);
+
+      if (error) throw error;
       
       // Broadcast update
       broadcast({ type: "GAME_DELETED", id: Number(id) });
       
       res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to delete game" });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
     }
   });
 

@@ -57,9 +57,15 @@ export default function App() {
     try {
       const response = await fetch('/api/games');
       const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to fetch games');
+      }
       setGames(data);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error fetching games:', error);
+      if (error.message.includes('SUPABASE_URL')) {
+        alert('Supabase is not configured. Please add SUPABASE_URL and SUPABASE_KEY to your Secrets.');
+      }
     } finally {
       setLoading(false);
     }
@@ -84,13 +90,16 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...newGame, password: 'bkenn204' })
       });
-      if (response.ok) {
-        fetchGames();
-        setShowAddModal(false);
-        setNewGame({ title: '', url: '', thumbnail: '', description: '' });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to add game');
       }
-    } catch (error) {
+      fetchGames();
+      setShowAddModal(false);
+      setNewGame({ title: '', url: '', thumbnail: '', description: '' });
+    } catch (error: any) {
       console.error('Error adding game:', error);
+      alert(error.message);
     }
   };
 
@@ -102,11 +111,14 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: 'bkenn204' })
       });
-      if (response.ok) {
-        fetchGames();
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to delete game');
       }
-    } catch (error) {
+      fetchGames();
+    } catch (error: any) {
       console.error('Error deleting game:', error);
+      alert(error.message);
     }
   };
 
